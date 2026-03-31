@@ -1,0 +1,96 @@
+// Minimal subset of OpenShell openshell.proto for draft policy governance.
+// Source reference: OpenShell/proto/openshell.proto (do not edit upstream here).
+
+syntax = "proto3";
+
+package openshell.v1;
+
+import "sandbox.proto";
+
+service OpenShell {
+  rpc GetDraftPolicy(GetDraftPolicyRequest) returns (GetDraftPolicyResponse);
+  rpc ApproveDraftChunk(ApproveDraftChunkRequest) returns (ApproveDraftChunkResponse);
+  rpc RejectDraftChunk(RejectDraftChunkRequest) returns (RejectDraftChunkResponse);
+  rpc ApproveAllDraftChunks(ApproveAllDraftChunksRequest)
+      returns (ApproveAllDraftChunksResponse);
+  rpc EditDraftChunk(EditDraftChunkRequest) returns (EditDraftChunkResponse);
+  rpc ClearDraftChunks(ClearDraftChunksRequest) returns (ClearDraftChunksResponse);
+}
+
+message PolicyChunk {
+  string id = 1;
+  string status = 2; // "pending", "approved", "rejected"
+  string rule_name = 3;
+  openshell.sandbox.v1.NetworkPolicyRule proposed_rule = 4;
+  string rationale = 5;
+  string security_notes = 6;
+  float confidence = 7;
+  repeated string denial_summary_ids = 8;
+  int64 created_at_ms = 9;
+  int64 decided_at_ms = 10;
+  string stage = 11;
+  string supersedes_chunk_id = 12;
+  int32 hit_count = 13;
+  int64 first_seen_ms = 14;
+  int64 last_seen_ms = 15;
+  string binary = 16;
+}
+
+message GetDraftPolicyRequest {
+  string name = 1;
+  string status_filter = 2;
+}
+
+message GetDraftPolicyResponse {
+  repeated PolicyChunk chunks = 1;
+  string rolling_summary = 2;
+  uint64 draft_version = 3;
+  int64 last_analyzed_at_ms = 4;
+}
+
+message ApproveDraftChunkRequest {
+  string name = 1;
+  string chunk_id = 2;
+}
+
+message ApproveDraftChunkResponse {
+  uint32 policy_version = 1;
+  string policy_hash = 2;
+}
+
+message RejectDraftChunkRequest {
+  string name = 1;
+  string chunk_id = 2;
+  string reason = 3;
+}
+
+message RejectDraftChunkResponse {}
+
+message ApproveAllDraftChunksRequest {
+  string name = 1;
+  bool include_security_flagged = 2;
+}
+
+message ApproveAllDraftChunksResponse {
+  uint32 policy_version = 1;
+  string policy_hash = 2;
+  uint32 chunks_approved = 3;
+  uint32 chunks_skipped = 4;
+}
+
+message EditDraftChunkRequest {
+  string name = 1;
+  string chunk_id = 2;
+  openshell.sandbox.v1.NetworkPolicyRule proposed_rule = 3;
+}
+
+message EditDraftChunkResponse {}
+
+message ClearDraftChunksRequest {
+  string name = 1;
+}
+
+message ClearDraftChunksResponse {
+  uint32 chunks_cleared = 1;
+}
+
