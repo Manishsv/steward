@@ -27,6 +27,8 @@ class StewardActions:
     DRAFT_EDIT = "openshell.draft_policy.edit"
     DRAFT_APPROVE_ALL = "openshell.draft_policy.approve_all"
     DRAFT_CLEAR = "openshell.draft_policy.clear"
+    # Phase 2: candidate actions (still draft-policy scoped)
+    DRAFT_APPROVE_MATCHING = "openshell.draft_policy.approve_matching"
 
 
 _RISK_TIER_BY_ACTION: Dict[str, RiskTier] = {
@@ -36,6 +38,7 @@ _RISK_TIER_BY_ACTION: Dict[str, RiskTier] = {
     StewardActions.DRAFT_EDIT: RiskTier.medium,
     StewardActions.DRAFT_APPROVE_ALL: RiskTier.high,
     StewardActions.DRAFT_CLEAR: RiskTier.high,
+    StewardActions.DRAFT_APPROVE_MATCHING: RiskTier.medium,
 }
 
 
@@ -46,6 +49,7 @@ _APPROVER_ROLE_BY_ACTION: Dict[str, str] = {
     StewardActions.DRAFT_EDIT: "operator",
     StewardActions.DRAFT_APPROVE_ALL: "operator",
     StewardActions.DRAFT_CLEAR: "operator",
+    StewardActions.DRAFT_APPROVE_MATCHING: "operator",
 }
 
 
@@ -90,7 +94,7 @@ def build_execution_plan(
             steps=[],
         )
 
-    # Default: allow (no-op plan)
+    # Deny-by-default: if we have no governance policy for an action, do not allow.
     if action not in {
         StewardActions.DRAFT_GET,
         StewardActions.DRAFT_APPROVE,
@@ -98,23 +102,31 @@ def build_execution_plan(
         StewardActions.DRAFT_EDIT,
         StewardActions.DRAFT_APPROVE_ALL,
         StewardActions.DRAFT_CLEAR,
+        StewardActions.DRAFT_APPROVE_MATCHING,
     }:
+        family = action.split(".", 1)[0] if "." in action else action
         return ExecutionPlan(
-            decision=Decision.allow,
-            authorization_decision=AuthorizationDecision.allow,
+            decision=Decision.deny,
+            authorization_decision=AuthorizationDecision.deny,
             approval_state=ApprovalState.not_required,
-            rationale="Allowed by default policy.",
-            risk_tier=RiskTier.low,
-            approval_policy=ApprovalPolicy(approver_role="operator", auto_allow=True, notes="default"),
-            requirements=[],
-            steps=[
-                ExecutionStep(
-                    step=1,
-                    type="noop",
-                    description="No external integrations wired for this action.",
-                    payload={},
+            rationale=(
+                "Unsupported action: no governance policy exists for this action. "
+                f"(family={family})"
+            ),
+            risk_tier=RiskTier.high,
+            approval_policy=ApprovalPolicy(
+                approver_role="operator",
+                auto_allow=False,
+                notes="deny_by_default",
+            ),
+            requirements=[
+                ApprovalRequirement(
+                    requirement="operator",
+                    reason="Unsupported action requires explicit policy to be added before execution.",
+                    details={"action": action},
                 )
             ],
+            steps=[],
         )
 
     risk_tier = _RISK_TIER_BY_ACTION.get(action, RiskTier.medium)
@@ -326,6 +338,56 @@ def build_execution_plan(
             steps=steps,
         )
 
+    if action == StewardActions.DRAFT_APPROVE_MATCHING:
+        match = proposal.parameters.get("match") if isinstance(proposal.parameters, dict) else None
+        if not isinstance(match, dict):
+            return ExecutionPlan(
+                decision=Decision.deny,
+                authorization_decision=AuthorizationDecision.deny,
+                approval_state=ApprovalState.not_required,
+                rationale="Missing parameters.match for approve_matching.",
+                risk_tier=risk_tier,
+                approval_policy=approval_policy,
+                requirements=[],
+                steps=[],
+            )
+        host = str(match.get("host", "")).strip()
+        port = int(match.get("port", 0) or 0)
+        binary_path = str(match.get("binary_path", "")).strip()
+        if not host or port <= 0 or not binary_path:
+            return ExecutionPlan(
+                decision=Decision.deny,
+                authorization_decision=AuthorizationDecision.deny,
+                approval_state=ApprovalState.not_required,
+                rationale="parameters.match must include host, port, and binary_path.",
+                risk_tier=risk_tier,
+                approval_policy=approval_policy,
+                requirements=[],
+                steps=[],
+            )
+
+        steps.append(
+            ExecutionStep(
+                step=1,
+                type="openshell.approve_matching_draft_chunk",
+                description="Approve a pending draft chunk that matches host/port/binary.",
+                payload={
+                    "sandbox_name": sandbox_name,
+                    "match": {"host": host, "port": port, "binary_path": binary_path},
+                },
+            )
+        )
+        return ExecutionPlan(
+            decision=Decision.allow,
+            authorization_decision=AuthorizationDecision.allow,
+            approval_state=ApprovalState.approved,
+            rationale="Approved matching draft chunk by operator.",
+            risk_tier=risk_tier,
+            approval_policy=approval_policy,
+            requirements=[],
+            steps=steps,
+        )
+
     return ExecutionPlan(
         decision=Decision.deny,
         authorization_decision=AuthorizationDecision.deny,
@@ -376,6 +438,42 @@ def execute_plan(openshell: OpenShellClient, plan: ExecutionPlan) -> Tuple[bool,
                         chunk_id=str(p["chunk_id"]),
                     )
                 )
+            elif t == "openshell.approve_matching_draft_chunk":
+                m = p.get("match") if isinstance(p, dict) else None
+                m = m if isinstance(m, dict) else {}
+                host = str(m.get("host", "")).strip()
+                port = int(m.get("port", 0) or 0)
+                binary_path = str(m.get("binary_path", "")).strip()
+                dp = openshell.get_draft_policy(sandbox_name=str(p["sandbox_name"]))
+                found: Optional[DraftPolicyChunk] = None
+                for c in dp.chunks:
+                    if str(c.status).lower() != "pending":
+                        continue
+                    eps = (c.proposed_rule or {}).get("endpoints", []) if isinstance(c.proposed_rule, dict) else []
+                    bins = (c.proposed_rule or {}).get("binaries", []) if isinstance(c.proposed_rule, dict) else []
+                    if not isinstance(eps, list) or not isinstance(bins, list):
+                        continue
+                    ep_ok = any(
+                        isinstance(e, dict)
+                        and str(e.get("host", "")).strip() == host
+                        and int(e.get("port", 0) or 0) == port
+                        for e in eps
+                    )
+                    bin_ok = any(
+                        isinstance(b, dict) and str(b.get("path", "")).strip() == binary_path for b in bins
+                    )
+                    if ep_ok and bin_ok:
+                        found = c
+                        break
+                if not found:
+                    results.append({"ok": False, "error": "chunk_not_found", "match": m})
+                else:
+                    results.append(
+                        openshell.approve_draft_chunk(
+                            sandbox_name=str(p["sandbox_name"]),
+                            chunk_id=str(found.id),
+                        )
+                    )
             elif t == "openshell.reject_draft_chunk":
                 results.append(
                     openshell.reject_draft_chunk(

@@ -101,6 +101,13 @@ What Steward does in Phase 1A:
 - **Executes** the gRPC call when allowed (`/action/execute`)
 - **Audits**: stores decision basis + external refs (`/audit/{id}`)
 
+### Deny-by-default for unsupported actions
+
+Steward is **deny-by-default** for actions without an explicit governance policy.
+If `proposal.action` is unknown or unsupported, `/action/authorize` returns `deny` with a rationale like:
+
+- “Unsupported action: no governance policy exists for this action.”
+
 ### Configure OpenShell gRPC (mTLS)
 
 OpenShell gRPC typically requires **mTLS**. Steward reads these env vars at startup (restart `uvicorn` after changes):
@@ -196,6 +203,12 @@ Steward returns a structured `403` with an `audit_id` when:
 - the governance decision is not allowed, or
 - an upstream OpenShell call fails (connectivity, TLS, auth, etc.)
 
+`/action/execute` failures include a `detail.user_hint` that is **decision-aware**:
+
+- **needs_approval**: approval required before execution; request operator approval and retry
+- **deny (unsupported)**: action unsupported; use a supported action or add an explicit Steward policy
+- **allow + runtime failure**: governance allowed, but OpenShell/runtime execution failed; check mTLS/connectivity and identifiers
+
 Inspect the underlying error via:
 
 ```bash
@@ -209,3 +222,8 @@ curl -sS localhost:8000/audit/<audit_id> | jq '.payload.audit'
 ```
 
 This includes stable identifiers (like `proposal_id`) and consistent `external_refs` (sandbox name, chunk id, and the OpenShell operation).
+
+## Roadmap and milestone checkpoint
+
+- Roadmap: `ROADMAP.md`
+- Phase 1A checkpoint: `MILESTONE.md`
