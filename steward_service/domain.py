@@ -257,3 +257,24 @@ class PolicyDefinition:
     display_name: str
     description: str = ""
     version: str = "1"
+
+
+# ---------------------------------------------------------------------------
+# Institutional decision governance (domain-level; not OpenShell/runtime)
+# ---------------------------------------------------------------------------
+
+InstitutionDecisionOutcome = Literal["allow", "needs_approval", "escalate", "defer"]
+
+
+@dataclass(frozen=True)
+class InstitutionalDecisionRecord:
+    """Institutional decision outcome (role/rules/facts/procedure), not runtime execution."""
+
+    id: str
+    created_at: datetime
+    proposal: Proposal
+    outcome: InstitutionDecisionOutcome
+    rationale: str
+    domain: str = "institution.expenditure.v1"
+    rule_id: str = ""
+    missing_facts: List[str] = field(default_factory=list)

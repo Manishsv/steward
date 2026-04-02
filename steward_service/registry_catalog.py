@@ -24,6 +24,12 @@ ROLES: Dict[str, RoleDefinition] = {
         description="Automated actor; mutations typically require approval.",
         version="1",
     ),
+    "junior_engineer": RoleDefinition(
+        id="junior_engineer",
+        display_name="Junior Engineer",
+        description="Junior engineer with limited institutional authority for expenditure approvals.",
+        version="1",
+    ),
 }
 
 POLICIES: Dict[str, PolicyDefinition] = {

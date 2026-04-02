@@ -399,3 +399,46 @@ Documented in **“Milestone: Full approval-aware governed workflow in OpenClaw�
 
 **Remaining gaps:**
 - `/nemoclaw request` does not yet automatically “retry” post-approval; operator re-runs request if needed.
+
+---
+
+## Next major milestone: institutional decision governance (expenditure)
+
+**Goal:** Demonstrate one real domain decision governed by role authority + rules + facts + context + procedure state.
+
+**Slice implemented:** expenditure approval (`expenditure.approve`) via a dedicated institutional endpoint (**no OpenShell changes**):
+
+- `POST /institution/authorize` → `outcome` in `{allow, needs_approval, escalate, defer}` + `decision_record_id`
+- `GET /institution/decision-records/{id}` → inspectable record (proposal + outcome + rationale + rule_id + missing_facts)
+
+**Rule implemented (v1):**
+- `junior_engineer` may `allow` only when `amount_rs <= 50,000`
+- above threshold: `escalate`
+- missing required facts/procedure fields: `defer`
+- other roles: `needs_approval`
+
+**Registry-backed vs hard-coded:**
+- Registry-backed: `RoleDefinition` seed includes `junior_engineer` (`registry_catalog.py`)
+- Hard-coded: the expenditure rule logic lives in `main.py` (`_institution_expenditure_authorize`)
+
+**Files changed:** `steward_service/domain.py`, `steward_service/registry_catalog.py`, `steward_service/main.py`, `steward_service/institution_store.py`, `tests/test_institution_expenditure.py`
+
+**Tests added:** `tests/test_institution_expenditure.py`
+
+**Manual verification:**
+```bash
+BASE=http://127.0.0.1:8000
+curl -sS -X POST "$BASE/institution/authorize" -H 'content-type: application/json' -d '{
+  "proposal": {
+    "action": "expenditure.approve",
+    "purpose": "Approve expenditure",
+    "role": "junior_engineer",
+    "context": { "procedure": "expense_v1", "procedure_state": "request_submitted" },
+    "parameters": { "amount_rs": 10000 }
+  }
+}' | jq .
+```
+Expected: `outcome=allow` and a `decision_record_id`. Then:
+```bash
+curl -sS "$BASE/institution/decision-records/<id>" | jq .
+```

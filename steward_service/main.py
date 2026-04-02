@@ -26,10 +26,12 @@ from .domain import DecisionRecord
 from .domain import ExecutionPlan
 from .domain import ExecutionRecord
 from .domain import GovernanceProposalRecord
+from .domain import InstitutionalDecisionRecord
 from .domain import Proposal as InternalProposal
 from .domain import ProposalLifecycleState
 from .decision_store import InMemoryDecisionStore
 from .execution_store import InMemoryExecutionStore
+from .institution_store import InMemoryInstitutionDecisionStore
 from .identity import parse_identity
 from .governance import build_execution_plan, execute_plan, generated_external_refs
 from .governance_context import GovernanceContext
@@ -105,6 +107,23 @@ class AuditRecord(BaseModel):
     decision_record_id: Optional[str] = None
     execution_record_id: Optional[str] = None
     operator_hints: Dict[str, str] = Field(default_factory=dict)
+
+
+class InstitutionDecisionOutcome(str, Enum):
+    allow = "allow"
+    needs_approval = "needs_approval"
+    escalate = "escalate"
+    defer = "defer"
+
+
+class InstitutionAuthorizeRequest(BaseModel):
+    proposal: ActionProposal
+
+
+class InstitutionAuthorizeResponse(BaseModel):
+    outcome: InstitutionDecisionOutcome
+    rationale: str
+    decision_record_id: str
 
 class Candidate(BaseModel):
     id: str = Field(..., min_length=1)
@@ -262,6 +281,65 @@ _decisions = InMemoryDecisionStore()
 _executions = InMemoryExecutionStore()
 _approvals = InMemoryApprovalStore()
 _candidate_sets = InMemoryCandidateSetStore()
+_institution = InMemoryInstitutionDecisionStore()
+
+
+def _institution_expenditure_authorize(req: ActionProposal) -> tuple[InstitutionDecisionOutcome, str, str, list[str]]:
+    """
+    Minimal vertical slice: expenditure approval domain.
+
+    Rule:
+      - junior_engineer may allow expenditure approvals only if amount_rs <= 50_000
+      - above threshold: escalate
+      - missing facts or missing procedure state: defer
+    """
+    missing: list[str] = []
+    params = dict(req.parameters)
+    ctx = dict(req.context)
+
+    # Required facts
+    amount = params.get("amount_rs")
+    if not isinstance(amount, (int, float)):
+        missing.append("amount_rs")
+    # Required procedure state
+    proc = ctx.get("procedure")
+    state = ctx.get("procedure_state")
+    if not isinstance(proc, str) or not proc.strip():
+        missing.append("procedure")
+    if not isinstance(state, str) or not state.strip():
+        missing.append("procedure_state")
+
+    if missing:
+        return (
+            InstitutionDecisionOutcome.defer,
+            f"Deferred: missing required fact(s) or procedure state: {', '.join(missing)}.",
+            "rule.expenditure.required_facts_v1",
+            missing,
+        )
+
+    role = (req.role or "").strip().lower()
+    amt = float(amount)
+    if role == "junior_engineer":
+        if amt <= 50_000:
+            return (
+                InstitutionDecisionOutcome.allow,
+                "Allowed: junior_engineer authority applies (amount_rs <= 50,000).",
+                "rule.expenditure.junior_threshold_v1",
+                [],
+            )
+        return (
+            InstitutionDecisionOutcome.escalate,
+            "Escalate: amount exceeds junior_engineer authority threshold (amount_rs > 50,000).",
+            "rule.expenditure.junior_threshold_v1",
+            [],
+        )
+
+    return (
+        InstitutionDecisionOutcome.needs_approval,
+        f"Needs approval: role '{role or 'unknown'}' has no direct authority for this expenditure approval.",
+        "rule.expenditure.role_authority_v1",
+        [],
+    )
 _openshell = create_openshell_client()
 
 
@@ -923,6 +1001,54 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
         )
 
     return ExecuteResponse(audit_id=audit_id, status="executed", result=result)
+
+
+@app.post("/institution/authorize", response_model=InstitutionAuthorizeResponse)
+def institution_authorize(req: InstitutionAuthorizeRequest) -> InstitutionAuthorizeResponse:
+    """
+    Institutional decision governance: domain-level authorize (no runtime execution).
+
+    Keeps a dedicated record store and outcome enum so we can support:
+      allow | needs_approval | escalate | defer
+    without breaking `/action/*` clients that only understand allow/deny/needs_approval.
+    """
+    internal = _to_internal(req.proposal)
+    outcome, rationale, rule_id, missing = _institution_expenditure_authorize(req.proposal)
+    rid = _institution.new_id()
+    rec = InstitutionalDecisionRecord(
+        id=rid,
+        created_at=_institution.now(),
+        proposal=internal,
+        outcome=outcome.value,
+        rationale=rationale,
+        rule_id=rule_id,
+        missing_facts=list(missing),
+    )
+    _institution.put(rec)
+    return InstitutionAuthorizeResponse(outcome=outcome, rationale=rationale, decision_record_id=rid)
+
+
+@app.get("/institution/decision-records/{record_id}")
+def institution_get_decision_record(record_id: str) -> Dict[str, Any]:
+    rec = _institution.get(record_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="institution decision record not found")
+    return {
+        "id": rec.id,
+        "created_at": rec.created_at,
+        "domain": rec.domain,
+        "outcome": rec.outcome,
+        "rationale": rec.rationale,
+        "rule_id": rec.rule_id,
+        "missing_facts": list(rec.missing_facts),
+        "proposal": {
+            "action": rec.proposal.action,
+            "purpose": rec.proposal.purpose,
+            "role": rec.proposal.role,
+            "context": dict(rec.proposal.context),
+            "parameters": dict(rec.proposal.parameters),
+        },
+    }
 
 def _evaluate_candidates_impl(req: EvaluateCandidatesRequest) -> EvaluateCandidatesResponse:
     """
