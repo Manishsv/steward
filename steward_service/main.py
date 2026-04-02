@@ -392,12 +392,18 @@ def _effective_plan_for_execute(
     now = datetime.now(timezone.utc)
     if ar.expires_at is not None and ar.expires_at <= now:
         return plan, False
+    decided = ar.decided_by.strip() if isinstance(ar.decided_by, str) and ar.decided_by.strip() else "operator"
+    rationale = (
+        f"Approved via approval request {ar_id.strip()} (decided_by={decided}); "
+        "requirements satisfied, executing with approval."
+    )
     return (
         replace(
             plan,
             decision=DomainDecision.allow,
             authorization_decision=AuthorizationDecision.allow,
             approval_state=ApprovalState.approved,
+            rationale=rationale,
         ),
         True,
     )

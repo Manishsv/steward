@@ -343,9 +343,10 @@ Explicit **`/nemoclaw approval complete`** + client chain (already covered in �
 | | |
 |--|--|
 | **Files changed** | `Steward/steward_service/main.py`, `Steward/tests/test_approval_happy_path.py` |
-| **Behavior** | **`AuditRecord.operator_hints`**; execute failure **403** **`detail.decision_record_id`** / **`execution_record_id`**. |
+| **Behavior** | **`AuditRecord.operator_hints`**; execute failure **403** **`detail.decision_record_id`** / **`execution_record_id`**. **Correctness:** when execute resumes with an approved `ApprovalRequest`, the execute-side plan/audit/DecisionRecord rationale reflects the effective **allow after approval** (not the authorize-time `needs_approval` rationale). |
 | **Tests** | `test_approval_happy_path.py` (hints on authorize audit) |
 | **Manual** | **`GET /audit/{id}`** after authorize **`needs_approval`**. |
+| **Manual (rationale)** | Run `needs_approval` authorize, approve the request, execute with resume. Verify: `GET /audit/<authorize>` has rationale about unmet requirements; `GET /audit/<execute>` and `GET /decision-records/<execute decision_record_id>` have rationale starting with **“Approved via approval request …”**. |
 
 ### Operator milestone — Phase 6: RoleDefinition registry
 

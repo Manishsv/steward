@@ -75,6 +75,8 @@ class TestApprovalHappyPath(unittest.TestCase):
         ex = self.client.post("/action/execute", json={"proposal": prop})
         self.assertEqual(ex.status_code, 200, msg=ex.text)
         exec_audit = self.client.get(f"/audit/{ex.json()['audit_id']}").json()
+        self.assertEqual(exec_audit["decision"], "allow")
+        self.assertIn("Approved via approval request", exec_audit["rationale"])
         er_id = exec_audit["execution_record_id"]
         dr_id_exec = exec_audit["decision_record_id"]
         self.assertIsNotNone(er_id)
@@ -82,6 +84,7 @@ class TestApprovalHappyPath(unittest.TestCase):
 
         dr = self.client.get(f"/decision-records/{dr_id_exec}").json()
         self.assertEqual(dr["decision"], "allow")
+        self.assertIn("Approved via approval request", dr["rationale"])
         er = self.client.get(f"/execution-records/{er_id}").json()
         self.assertTrue(er["governance_decision_was_allow"])
         self.assertTrue(er["ok"])
