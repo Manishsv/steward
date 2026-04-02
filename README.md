@@ -146,31 +146,46 @@ OpenClaw warns if `plugins.allow` is empty. In the sandbox, edit:
 
 - `/sandbox/.openclaw-data/openclaw.json`
 
-Ensure it includes:
+Ensure it includes **`plugins.allow`** with **`nemoclaw`**, and (if `STEWARD_URL` does not reach the plugin) a **`stewardUrl`** under **`plugins.config.nemoclaw`** — especially when port **8000** is already used on the host (e.g. by Kong):
 
 ```json
 {
   "plugins": {
-    "allow": ["nemoclaw"]
+    "allow": ["nemoclaw"],
+    "config": {
+      "nemoclaw": {
+        "stewardUrl": "http://host.openshell.internal:8010"
+      }
+    }
   }
 }
 ```
 
-Then fully restart `openclaw tui`.
+Then fully restart `openclaw tui`. You should see a **Steward:** line in the NemoClaw startup banner when `stewardUrl` is picked up.
 
 ### 2) Ensure NemoClaw can find Steward
 
-Preferred: set the env var when launching the OpenClaw TUI inside the sandbox:
+**Preferred (reliable in sandbox):** set **`stewardUrl`** in **`openclaw.json`** as above. OpenClaw often does **not** pass **`STEWARD_URL`** from the shell into the plugin process.
+
+**If `openclaw.json` is root-owned (read-only) in the sandbox:** write a one-line Steward base URL to a **`steward-url`** file (readable by the plugin process). NemoClaw checks, in order: **`STEWARD_URL_FILE`**, **`$OPENCLAW_STATE_DIR/steward-url`**, **`/sandbox/.openclaw-data/steward-url`**, **`/sandbox/.openclaw/steward-url`**. Example:
 
 ```bash
-env STEWARD_URL="http://host.openshell.internal:8000" \
+printf '%s\n' 'http://host.openshell.internal:8010' > /sandbox/.openclaw-data/steward-url
+```
+
+Then retry `/nemoclaw` (restart TUI if the plugin cached nothing—file is read on each request).
+
+Optional: also set the env var when launching the TUI (works only if your OpenClaw build forwards it to plugins):
+
+```bash
+env STEWARD_URL="http://host.openshell.internal:8010" \
   OPENCLAW_STATE_DIR="/sandbox/.openclaw-data" \
   OPENCLAW_CONFIG_PATH="/sandbox/.openclaw-data/openclaw.json" \
   openclaw tui
 ```
 
 Notes:
-- Some environments sanitize extension env vars. NemoClaw is implemented to default to `http://host.openshell.internal:8000` when it detects it’s running in the OpenShell sandbox, but setting `STEWARD_URL` is still recommended.
+- NemoClaw defaults to `http://host.openshell.internal:8000` only when neither **`STEWARD_URL`** nor **`plugins.config.nemoclaw.stewardUrl`** is set.
 
 ### 3) Run the governed flow
 

@@ -52,6 +52,12 @@ class InMemoryAuditStore:
             "governance_basis": list(record.governance_basis),
             "external_refs": list(record.external_refs),
         }
+        if record.governance_proposal_id:
+            payload["audit"]["governance_proposal_id"] = record.governance_proposal_id
+        if record.decision_record_id:
+            payload["audit"]["decision_record_id"] = record.decision_record_id
+        if record.execution_record_id:
+            payload["audit"]["execution_record_id"] = record.execution_record_id
         return payload
 
     @staticmethod

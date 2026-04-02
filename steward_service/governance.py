@@ -16,6 +16,11 @@ from .domain import (
     Proposal,
     RiskTier,
 )
+from .capability_registry import (
+    capability_and_tool_for_action,
+    merge_action_and_capability_risk,
+)
+from .effective_policy import resolve_effective_policy, risk_exceeds_autonomy_ceiling
 from .openshell_client import DraftPolicyChunk, OpenShellClient
 
 
@@ -83,6 +88,7 @@ def build_execution_plan(
     proposal: Proposal, openshell: OpenShellClient
 ) -> ExecutionPlan:
     action = proposal.action.strip()
+    cap_id, tool_id = capability_and_tool_for_action(action)
     purpose = proposal.purpose.strip()
     if not action or not purpose:
         return ExecutionPlan(
@@ -92,6 +98,8 @@ def build_execution_plan(
             rationale="Missing action or purpose.",
             requirements=[],
             steps=[],
+            capability_id=cap_id,
+            tool_id=tool_id,
         )
 
     # Deny-by-default: if we have no governance policy for an action, do not allow.
@@ -127,13 +135,19 @@ def build_execution_plan(
                 )
             ],
             steps=[],
+            capability_id=cap_id,
+            tool_id=tool_id,
         )
 
-    risk_tier = _RISK_TIER_BY_ACTION.get(action, RiskTier.medium)
+    risk_tier = merge_action_and_capability_risk(
+        _RISK_TIER_BY_ACTION.get(action, RiskTier.medium),
+        cap_id,
+    )
+    effective = resolve_effective_policy(proposal)
     approval_policy = ApprovalPolicy(
         approver_role=_APPROVER_ROLE_BY_ACTION.get(action, "operator"),  # type: ignore[arg-type]
-        auto_allow=(risk_tier != RiskTier.high),
-        notes=f"phase_1a_risk={risk_tier.value}",
+        auto_allow=not risk_exceeds_autonomy_ceiling(risk_tier, effective.autonomy_ceiling),
+        notes=f"phase_1a_risk={risk_tier.value};effective_ceiling={effective.autonomy_ceiling.value}",
     )
 
     sandbox_name = str(proposal.parameters.get("sandbox_name", "")).strip()
@@ -147,6 +161,70 @@ def build_execution_plan(
             approval_policy=approval_policy,
             requirements=[],
             steps=[],
+            capability_id=cap_id,
+            tool_id=tool_id,
+        )
+
+    trusted = proposal.context.get("steward_identity_trusted")
+    if trusted is False:
+        return ExecutionPlan(
+            decision=Decision.deny,
+            authorization_decision=AuthorizationDecision.deny,
+            approval_state=ApprovalState.not_required,
+            rationale="Untrusted identity context (steward_identity_trusted=false).",
+            risk_tier=risk_tier,
+            approval_policy=approval_policy,
+            requirements=[],
+            steps=[],
+            capability_id=cap_id,
+            tool_id=tool_id,
+        )
+
+    outcome_hint = str(proposal.context.get("steward_governance_outcome_hint", "")).strip().lower()
+    if outcome_hint == "escalate":
+        return ExecutionPlan(
+            decision=Decision.deny,
+            authorization_decision=AuthorizationDecision.deny,
+            approval_state=ApprovalState.not_required,
+            rationale="Governance outcome: escalate.",
+            risk_tier=risk_tier,
+            approval_policy=approval_policy,
+            requirements=[],
+            steps=[],
+            capability_id=cap_id,
+            tool_id=tool_id,
+        )
+    if outcome_hint == "defer":
+        return ExecutionPlan(
+            decision=Decision.deny,
+            authorization_decision=AuthorizationDecision.deny,
+            approval_state=ApprovalState.not_required,
+            rationale="Governance outcome: defer.",
+            risk_tier=risk_tier,
+            approval_policy=approval_policy,
+            requirements=[],
+            steps=[],
+            capability_id=cap_id,
+            tool_id=tool_id,
+        )
+    if outcome_hint == "simulate_only":
+        return ExecutionPlan(
+            decision=Decision.needs_approval,
+            authorization_decision=AuthorizationDecision.allow,
+            approval_state=ApprovalState.pending,
+            rationale="Governance outcome: simulate_only (execution gated).",
+            risk_tier=risk_tier,
+            approval_policy=approval_policy,
+            requirements=[
+                ApprovalRequirement(
+                    requirement="operator",
+                    reason="simulate_only hint requires explicit approval to execute.",
+                    details={"hint": outcome_hint},
+                )
+            ],
+            steps=[],
+            capability_id=cap_id,
+            tool_id=tool_id,
         )
 
     steps: List[ExecutionStep] = []
@@ -173,10 +251,30 @@ def build_execution_plan(
             approval_policy=approval_policy,
             requirements=[],
             steps=steps,
+            capability_id=cap_id,
+            tool_id=tool_id,
         )
 
     # Mutations require operator role (approver_role concept)
     requirements.extend(_require_operator(proposal, reason="Draft policy mutations require operator role."))
+
+    skill = str(proposal.context.get("steward_skill_profile", "")).strip().lower()
+    if skill == "review_required":
+        requirements.append(
+            ApprovalRequirement(
+                requirement="operator",
+                reason="Skill profile requires human review.",
+                details={"steward_skill_profile": skill},
+            )
+        )
+    if outcome_hint == "recommend":
+        requirements.append(
+            ApprovalRequirement(
+                requirement="operator",
+                reason="Governance outcome: recommend (human confirmation).",
+                details={"hint": outcome_hint},
+            )
+        )
 
     chunk_id = str(proposal.parameters.get("chunk_id", "")).strip()
 
@@ -191,18 +289,25 @@ def build_execution_plan(
                 approval_policy=approval_policy,
                 requirements=[],
                 steps=[],
+                capability_id=cap_id,
+                tool_id=tool_id,
             )
         chunk = _find_chunk(openshell, sandbox_name=sandbox_name, chunk_id=chunk_id)
         if chunk is not None:
             requirements.extend(_approval_requirements_for_chunk(chunk))
 
-    # High risk actions are never auto-allowed in Phase 1A (even for operator).
-    if risk_tier == RiskTier.high:
+    # EffectivePolicy: tiers above the autonomy ceiling require explicit approval.
+    if risk_exceeds_autonomy_ceiling(risk_tier, effective.autonomy_ceiling):
         requirements.append(
             ApprovalRequirement(
                 requirement="operator",
-                reason="High-risk action requires explicit approval (cannot be auto-allowed).",
-                details={"action": action, "risk_tier": risk_tier.value},
+                reason="Risk tier exceeds effective autonomy ceiling (constitution/local merge).",
+                details={
+                    "action": action,
+                    "risk_tier": risk_tier.value,
+                    "autonomy_ceiling": effective.autonomy_ceiling.value,
+                    "constitution": effective.constitution_version,
+                },
             )
         )
 
@@ -216,6 +321,8 @@ def build_execution_plan(
             approval_policy=approval_policy,
             requirements=requirements,
             steps=[],
+            capability_id=cap_id,
+            tool_id=tool_id,
         )
 
     if action == StewardActions.DRAFT_APPROVE:
@@ -236,6 +343,8 @@ def build_execution_plan(
             approval_policy=approval_policy,
             requirements=[],
             steps=steps,
+            capability_id=cap_id,
+            tool_id=tool_id,
         )
 
     if action == StewardActions.DRAFT_REJECT:
@@ -260,6 +369,8 @@ def build_execution_plan(
             approval_policy=approval_policy,
             requirements=[],
             steps=steps,
+            capability_id=cap_id,
+            tool_id=tool_id,
         )
 
     if action == StewardActions.DRAFT_EDIT:
@@ -274,6 +385,8 @@ def build_execution_plan(
                 approval_policy=approval_policy,
                 requirements=[],
                 steps=[],
+                capability_id=cap_id,
+                tool_id=tool_id,
             )
         steps.append(
             ExecutionStep(
@@ -292,6 +405,8 @@ def build_execution_plan(
             approval_policy=approval_policy,
             requirements=[],
             steps=steps,
+            capability_id=cap_id,
+            tool_id=tool_id,
         )
 
     if action == StewardActions.DRAFT_APPROVE_ALL:
@@ -316,6 +431,8 @@ def build_execution_plan(
             approval_policy=approval_policy,
             requirements=[],
             steps=steps,
+            capability_id=cap_id,
+            tool_id=tool_id,
         )
 
     if action == StewardActions.DRAFT_CLEAR:
@@ -336,6 +453,8 @@ def build_execution_plan(
             approval_policy=approval_policy,
             requirements=[],
             steps=steps,
+            capability_id=cap_id,
+            tool_id=tool_id,
         )
 
     if action == StewardActions.DRAFT_APPROVE_MATCHING:
@@ -350,6 +469,8 @@ def build_execution_plan(
                 approval_policy=approval_policy,
                 requirements=[],
                 steps=[],
+                capability_id=cap_id,
+                tool_id=tool_id,
             )
         host = str(match.get("host", "")).strip()
         port = int(match.get("port", 0) or 0)
@@ -364,6 +485,8 @@ def build_execution_plan(
                 approval_policy=approval_policy,
                 requirements=[],
                 steps=[],
+                capability_id=cap_id,
+                tool_id=tool_id,
             )
 
         steps.append(
@@ -386,6 +509,8 @@ def build_execution_plan(
             approval_policy=approval_policy,
             requirements=[],
             steps=steps,
+            capability_id=cap_id,
+            tool_id=tool_id,
         )
 
     return ExecutionPlan(
@@ -397,6 +522,8 @@ def build_execution_plan(
         approval_policy=approval_policy,
         requirements=[],
         steps=[],
+        capability_id=cap_id,
+        tool_id=tool_id,
     )
 
 
