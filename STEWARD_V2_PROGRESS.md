@@ -369,3 +369,33 @@ Explicit **`/nemoclaw approval complete`** + client chain (already covered in �
 ### Operator milestone — Phase 8: Checkpoint
 
 Documented in **“Milestone: Full approval-aware governed workflow in OpenClaw”** above.
+
+---
+
+## Next milestone: approval-aware candidate-action lifecycle for `/nemoclaw request`
+
+**Goal:** When `/nemoclaw request ...` selects a candidate with `needs_approval`, NemoClaw surfaces an operator-ready handle (**authorize audit id**) and the exact next step (**`/nemoclaw approval complete <id>`**), reusing the same approval/resume model as explicit policy commands.
+
+**Files changed:** `NemoClaw/nemoclaw/src/commands/slash.ts`, `NemoClaw/nemoclaw/src/commands/slash.test.ts`
+
+**Behavior changed:**
+- If the selected candidate decision is `needs_approval`, output now includes:
+  - the original request
+  - selected candidate + selection rationale
+  - governance note
+  - **Operator handle (authorize audit)** and the exact next step:
+    - **`/nemoclaw approval complete <audit-id>`**
+- Approval completion replays the selected candidate proposal by reading `GET /audit/{id}` and executing with `steward_resume_proposal_id` + `approval_request_id`.
+
+**Tests updated:**
+- `slash.test.ts`: request `needs_approval` output includes audit handle + next-step command.
+- `slash.test.ts`: integration-style flow: request → needs_approval → approval complete replays selected proposal.
+
+**Manual verification (TUI):**
+1. `/nemoclaw request <sandbox> <natural language request>`
+2. If `needs_approval`, copy the **Operator handle (authorize audit)**.
+3. `/nemoclaw approval complete <that-audit-id>` as operator.
+4. Verify approval output shows the resumed action matches the selected candidate.
+
+**Remaining gaps:**
+- `/nemoclaw request` does not yet automatically “retry” post-approval; operator re-runs request if needed.
