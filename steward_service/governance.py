@@ -16,12 +16,13 @@ from .domain import (
     Proposal,
     RiskTier,
 )
-from .capability_registry import (
-    capability_and_tool_for_action,
-    merge_action_and_capability_risk,
-)
+from .capability_registry import capability_and_tool_for_action, merge_action_and_capability_risk
 from .effective_policy import resolve_effective_policy, risk_exceeds_autonomy_ceiling
 from .openshell_client import DraftPolicyChunk, OpenShellClient
+from .technical_governance import (
+    TechnicalDraftPolicyGovernance,
+    get_technical_draft_policy_governance,
+)
 
 
 class StewardActions:
@@ -36,25 +37,15 @@ class StewardActions:
     DRAFT_APPROVE_MATCHING = "openshell.draft_policy.approve_matching"
 
 
-_RISK_TIER_BY_ACTION: Dict[str, RiskTier] = {
-    StewardActions.DRAFT_GET: RiskTier.low,
-    StewardActions.DRAFT_APPROVE: RiskTier.medium,
-    StewardActions.DRAFT_REJECT: RiskTier.medium,
-    StewardActions.DRAFT_EDIT: RiskTier.medium,
-    StewardActions.DRAFT_APPROVE_ALL: RiskTier.high,
-    StewardActions.DRAFT_CLEAR: RiskTier.high,
-    StewardActions.DRAFT_APPROVE_MATCHING: RiskTier.medium,
-}
-
-
-_APPROVER_ROLE_BY_ACTION: Dict[str, str] = {
-    StewardActions.DRAFT_GET: "operator",
-    StewardActions.DRAFT_APPROVE: "operator",
-    StewardActions.DRAFT_REJECT: "operator",
-    StewardActions.DRAFT_EDIT: "operator",
-    StewardActions.DRAFT_APPROVE_ALL: "operator",
-    StewardActions.DRAFT_CLEAR: "operator",
-    StewardActions.DRAFT_APPROVE_MATCHING: "operator",
+# execute.kind (JSON) -> OpenShell step type (unchanged wire contract)
+_EXECUTE_KIND_TO_STEP_TYPE: Dict[str, str] = {
+    "get_draft_policy": "openshell.get_draft_policy",
+    "approve_chunk": "openshell.approve_draft_chunk",
+    "reject_chunk": "openshell.reject_draft_chunk",
+    "edit_chunk": "openshell.edit_draft_chunk",
+    "approve_all": "openshell.approve_all_draft_chunks",
+    "clear": "openshell.clear_draft_chunks",
+    "approve_matching": "openshell.approve_matching_draft_chunk",
 }
 
 
@@ -85,11 +76,16 @@ def _require_operator(proposal: Proposal, *, reason: str) -> List[ApprovalRequir
 
 
 def build_execution_plan(
-    proposal: Proposal, openshell: OpenShellClient
+    proposal: Proposal,
+    openshell: OpenShellClient,
+    *,
+    technical_gov: Optional[TechnicalDraftPolicyGovernance] = None,
 ) -> ExecutionPlan:
+    gov = technical_gov or get_technical_draft_policy_governance()
     action = proposal.action.strip()
-    cap_id, tool_id = capability_and_tool_for_action(action)
     purpose = proposal.purpose.strip()
+
+    cap_id, tool_id = capability_and_tool_for_action(action)
     if not action or not purpose:
         return ExecutionPlan(
             decision=Decision.deny,
@@ -102,50 +98,41 @@ def build_execution_plan(
             tool_id=tool_id,
         )
 
-    # Deny-by-default: if we have no governance policy for an action, do not allow.
-    if action not in {
-        StewardActions.DRAFT_GET,
-        StewardActions.DRAFT_APPROVE,
-        StewardActions.DRAFT_REJECT,
-        StewardActions.DRAFT_EDIT,
-        StewardActions.DRAFT_APPROVE_ALL,
-        StewardActions.DRAFT_CLEAR,
-        StewardActions.DRAFT_APPROVE_MATCHING,
-    }:
+    defn = gov.actions_by_steward_action.get(action)
+    dd = gov.default_deny
+
+    if defn is None:
         family = action.split(".", 1)[0] if "." in action else action
+        cap_unk, tool_unk = capability_and_tool_for_action(action)
         return ExecutionPlan(
             decision=Decision.deny,
             authorization_decision=AuthorizationDecision.deny,
             approval_state=ApprovalState.not_required,
-            rationale=(
-                "Unsupported action: no governance policy exists for this action. "
-                f"(family={family})"
-            ),
-            risk_tier=RiskTier.high,
+            rationale=dd.unsupported_rationale_template.format(family=family),
+            risk_tier=dd.risk_tier,
             approval_policy=ApprovalPolicy(
-                approver_role="operator",
+                approver_role=dd.approver_role,  # type: ignore[arg-type]
                 auto_allow=False,
-                notes="deny_by_default",
+                notes=dd.approval_policy_notes,
             ),
             requirements=[
                 ApprovalRequirement(
                     requirement="operator",
-                    reason="Unsupported action requires explicit policy to be added before execution.",
+                    reason=dd.unsupported_requirement_reason,
                     details={"action": action},
                 )
             ],
             steps=[],
-            capability_id=cap_id,
-            tool_id=tool_id,
+            capability_id=cap_unk,
+            tool_id=tool_unk,
         )
 
-    risk_tier = merge_action_and_capability_risk(
-        _RISK_TIER_BY_ACTION.get(action, RiskTier.medium),
-        cap_id,
-    )
+    cap_id = defn.capability_id
+    tool_id = defn.tool_id
+    risk_tier = merge_action_and_capability_risk(defn.base_risk_tier, cap_id)
     effective = resolve_effective_policy(proposal)
     approval_policy = ApprovalPolicy(
-        approver_role=_APPROVER_ROLE_BY_ACTION.get(action, "operator"),  # type: ignore[arg-type]
+        approver_role=defn.approver_role,  # type: ignore[arg-type]
         auto_allow=not risk_exceeds_autonomy_ceiling(risk_tier, effective.autonomy_ceiling),
         notes=f"phase_1a_risk={risk_tier.value};effective_ceiling={effective.autonomy_ceiling.value}",
     )
@@ -229,13 +216,28 @@ def build_execution_plan(
 
     steps: List[ExecutionStep] = []
     requirements: List[ApprovalRequirement] = []
+    ex = defn.execute
+    step_type = _EXECUTE_KIND_TO_STEP_TYPE.get(ex.kind)
+    if step_type is None:
+        return ExecutionPlan(
+            decision=Decision.deny,
+            authorization_decision=AuthorizationDecision.deny,
+            approval_state=ApprovalState.not_required,
+            rationale=f"Unknown execute.kind in technical governance: {ex.kind}",
+            risk_tier=risk_tier,
+            approval_policy=approval_policy,
+            requirements=[],
+            steps=[],
+            capability_id=cap_id,
+            tool_id=tool_id,
+        )
 
-    if action == StewardActions.DRAFT_GET:
+    if ex.kind == "get_draft_policy":
         steps.append(
             ExecutionStep(
                 step=1,
-                type="openshell.get_draft_policy",
-                description="Fetch draft policy chunks for sandbox.",
+                type=step_type,
+                description=ex.step_description,
                 payload={
                     "sandbox_name": sandbox_name,
                     "status_filter": proposal.parameters.get("status_filter", ""),
@@ -246,7 +248,7 @@ def build_execution_plan(
             decision=Decision.allow,
             authorization_decision=AuthorizationDecision.allow,
             approval_state=ApprovalState.not_required,
-            rationale="Read-only draft policy fetch.",
+            rationale=ex.allow_rationale,
             risk_tier=risk_tier,
             approval_policy=approval_policy,
             requirements=[],
@@ -255,8 +257,17 @@ def build_execution_plan(
             tool_id=tool_id,
         )
 
-    # Mutations require operator role (approver_role concept)
-    requirements.extend(_require_operator(proposal, reason="Draft policy mutations require operator role."))
+    if defn.mutation:
+        requirements.extend(_require_operator(proposal, reason=defn.mutation_operator_reason))
+
+    if defn.bulk_always_needs_approval:
+        requirements.append(
+            ApprovalRequirement(
+                requirement="operator",
+                reason=defn.bulk_approval_reason,
+                details={"action": action},
+            )
+        )
 
     skill = str(proposal.context.get("steward_skill_profile", "")).strip().lower()
     if skill == "review_required":
@@ -278,7 +289,7 @@ def build_execution_plan(
 
     chunk_id = str(proposal.parameters.get("chunk_id", "")).strip()
 
-    if action in {StewardActions.DRAFT_APPROVE, StewardActions.DRAFT_REJECT, StewardActions.DRAFT_EDIT}:
+    if defn.requires_chunk_id:
         if not chunk_id:
             return ExecutionPlan(
                 decision=Decision.deny,
@@ -292,11 +303,11 @@ def build_execution_plan(
                 capability_id=cap_id,
                 tool_id=tool_id,
             )
-        chunk = _find_chunk(openshell, sandbox_name=sandbox_name, chunk_id=chunk_id)
-        if chunk is not None:
-            requirements.extend(_approval_requirements_for_chunk(chunk))
+        if defn.inspect_chunk_security_notes:
+            chunk = _find_chunk(openshell, sandbox_name=sandbox_name, chunk_id=chunk_id)
+            if chunk is not None:
+                requirements.extend(_approval_requirements_for_chunk(chunk))
 
-    # EffectivePolicy: tiers above the autonomy ceiling require explicit approval.
     if risk_exceeds_autonomy_ceiling(risk_tier, effective.autonomy_ceiling):
         requirements.append(
             ApprovalRequirement(
@@ -325,12 +336,12 @@ def build_execution_plan(
             tool_id=tool_id,
         )
 
-    if action == StewardActions.DRAFT_APPROVE:
+    if ex.kind == "approve_chunk":
         steps.append(
             ExecutionStep(
                 step=1,
-                type="openshell.approve_draft_chunk",
-                description="Approve one pending draft chunk.",
+                type=step_type,
+                description=ex.step_description,
                 payload={"sandbox_name": sandbox_name, "chunk_id": chunk_id},
             )
         )
@@ -338,7 +349,7 @@ def build_execution_plan(
             decision=Decision.allow,
             authorization_decision=AuthorizationDecision.allow,
             approval_state=ApprovalState.approved,
-            rationale="Approved by operator.",
+            rationale=ex.allow_rationale,
             risk_tier=risk_tier,
             approval_policy=approval_policy,
             requirements=[],
@@ -347,12 +358,12 @@ def build_execution_plan(
             tool_id=tool_id,
         )
 
-    if action == StewardActions.DRAFT_REJECT:
+    if ex.kind == "reject_chunk":
         steps.append(
             ExecutionStep(
                 step=1,
-                type="openshell.reject_draft_chunk",
-                description="Reject one pending draft chunk.",
+                type=step_type,
+                description=ex.step_description,
                 payload={
                     "sandbox_name": sandbox_name,
                     "chunk_id": chunk_id,
@@ -364,7 +375,7 @@ def build_execution_plan(
             decision=Decision.allow,
             authorization_decision=AuthorizationDecision.allow,
             approval_state=ApprovalState.approved,
-            rationale="Rejected by operator.",
+            rationale=ex.allow_rationale,
             risk_tier=risk_tier,
             approval_policy=approval_policy,
             requirements=[],
@@ -373,9 +384,9 @@ def build_execution_plan(
             tool_id=tool_id,
         )
 
-    if action == StewardActions.DRAFT_EDIT:
+    if ex.kind == "edit_chunk":
         proposed_rule = proposal.parameters.get("proposed_rule")
-        if not isinstance(proposed_rule, dict):
+        if ex.requires_proposed_rule and not isinstance(proposed_rule, dict):
             return ExecutionPlan(
                 decision=Decision.deny,
                 authorization_decision=AuthorizationDecision.deny,
@@ -391,8 +402,8 @@ def build_execution_plan(
         steps.append(
             ExecutionStep(
                 step=1,
-                type="openshell.edit_draft_chunk",
-                description="Edit one pending draft chunk in-place.",
+                type=step_type,
+                description=ex.step_description,
                 payload={"sandbox_name": sandbox_name, "chunk_id": chunk_id, "proposed_rule": proposed_rule},
             )
         )
@@ -400,7 +411,7 @@ def build_execution_plan(
             decision=Decision.allow,
             authorization_decision=AuthorizationDecision.allow,
             approval_state=ApprovalState.approved,
-            rationale="Edited by operator.",
+            rationale=ex.allow_rationale,
             risk_tier=risk_tier,
             approval_policy=approval_policy,
             requirements=[],
@@ -409,13 +420,13 @@ def build_execution_plan(
             tool_id=tool_id,
         )
 
-    if action == StewardActions.DRAFT_APPROVE_ALL:
+    if ex.kind == "approve_all":
         include_security_flagged = bool(proposal.parameters.get("include_security_flagged", False))
         steps.append(
             ExecutionStep(
                 step=1,
-                type="openshell.approve_all_draft_chunks",
-                description="Approve all pending chunks (optionally include security-flagged).",
+                type=step_type,
+                description=ex.step_description,
                 payload={
                     "sandbox_name": sandbox_name,
                     "include_security_flagged": include_security_flagged,
@@ -426,7 +437,7 @@ def build_execution_plan(
             decision=Decision.allow,
             authorization_decision=AuthorizationDecision.allow,
             approval_state=ApprovalState.approved,
-            rationale="Approved all by operator.",
+            rationale=ex.allow_rationale,
             risk_tier=risk_tier,
             approval_policy=approval_policy,
             requirements=[],
@@ -435,12 +446,12 @@ def build_execution_plan(
             tool_id=tool_id,
         )
 
-    if action == StewardActions.DRAFT_CLEAR:
+    if ex.kind == "clear":
         steps.append(
             ExecutionStep(
                 step=1,
-                type="openshell.clear_draft_chunks",
-                description="Clear all pending draft chunks for sandbox.",
+                type=step_type,
+                description=ex.step_description,
                 payload={"sandbox_name": sandbox_name},
             )
         )
@@ -448,7 +459,7 @@ def build_execution_plan(
             decision=Decision.allow,
             authorization_decision=AuthorizationDecision.allow,
             approval_state=ApprovalState.approved,
-            rationale="Cleared by operator.",
+            rationale=ex.allow_rationale,
             risk_tier=risk_tier,
             approval_policy=approval_policy,
             requirements=[],
@@ -457,7 +468,20 @@ def build_execution_plan(
             tool_id=tool_id,
         )
 
-    if action == StewardActions.DRAFT_APPROVE_MATCHING:
+    if ex.kind == "approve_matching":
+        if not ex.requires_match:
+            return ExecutionPlan(
+                decision=Decision.deny,
+                authorization_decision=AuthorizationDecision.deny,
+                approval_state=ApprovalState.not_required,
+                rationale="approve_matching requires execute.requires_match in technical governance JSON.",
+                risk_tier=risk_tier,
+                approval_policy=approval_policy,
+                requirements=[],
+                steps=[],
+                capability_id=cap_id,
+                tool_id=tool_id,
+            )
         match = proposal.parameters.get("match") if isinstance(proposal.parameters, dict) else None
         if not isinstance(match, dict):
             return ExecutionPlan(
@@ -492,8 +516,8 @@ def build_execution_plan(
         steps.append(
             ExecutionStep(
                 step=1,
-                type="openshell.approve_matching_draft_chunk",
-                description="Approve a pending draft chunk that matches host/port/binary.",
+                type=step_type,
+                description=ex.step_description,
                 payload={
                     "sandbox_name": sandbox_name,
                     "match": {"host": host, "port": port, "binary_path": binary_path},
@@ -504,7 +528,7 @@ def build_execution_plan(
             decision=Decision.allow,
             authorization_decision=AuthorizationDecision.allow,
             approval_state=ApprovalState.approved,
-            rationale="Approved matching draft chunk by operator.",
+            rationale=ex.allow_rationale,
             risk_tier=risk_tier,
             approval_policy=approval_policy,
             requirements=[],
@@ -673,4 +697,3 @@ def generated_external_refs(proposal: Proposal, plan: ExecutionPlan) -> List[Dic
         seen.add(key)
         out.append(r)
     return out
-

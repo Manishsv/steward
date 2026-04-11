@@ -11,8 +11,10 @@ from pydantic import BaseModel, Field
 
 from .audit_store import InMemoryAuditStore
 from .canonical import canonical_json_bytes
-from .effective_policy import resolve_effective_policy as resolve_effective_policy_record
-from .approval_store import InMemoryApprovalStore
+from .effective_policy import (
+    ensure_effective_policy_merge_warmed,
+    resolve_effective_policy as resolve_effective_policy_record,
+)
 from .domain import ApprovalRequestRecord
 from .domain import ApprovalRequestState
 from .domain import ApprovalState
@@ -29,10 +31,10 @@ from .domain import GovernanceProposalRecord
 from .domain import InstitutionalDecisionRecord
 from .domain import Proposal as InternalProposal
 from .domain import ProposalLifecycleState
-from .decision_store import InMemoryDecisionStore
-from .execution_store import InMemoryExecutionStore
-from .institution_store import InMemoryInstitutionDecisionStore
 from .identity import parse_identity
+from .institution_engine import evaluate_expenditure
+from .institution_rules import load_expenditure_ruleset, register_expenditure_policy_metadata
+from .technical_governance import get_technical_draft_policy_governance
 from .governance import build_execution_plan, execute_plan, generated_external_refs
 from .governance_context import GovernanceContext
 from .openshell_client import create_openshell_client
@@ -47,9 +49,8 @@ from .proposal_service import (
     mark_proposal_denied_after_approval_rejection,
     submit,
 )
-from .proposal_store import InMemoryProposalStore
-from .candidate_set_store import InMemoryCandidateSetStore
 from .registry_catalog import CAPABILITIES, POLICIES, ROLES, TOOLS
+from .storage.factory import build_storage_bundle
 
 
 class Decision(str, Enum):
@@ -275,71 +276,27 @@ class PolicyDefinitionResponse(BaseModel):
     version: str = "1"
 
 
-_audit = InMemoryAuditStore()
-_proposals = InMemoryProposalStore()
-_decisions = InMemoryDecisionStore()
-_executions = InMemoryExecutionStore()
-_approvals = InMemoryApprovalStore()
-_candidate_sets = InMemoryCandidateSetStore()
-_institution = InMemoryInstitutionDecisionStore()
+_stores = build_storage_bundle()
+_audit = _stores.audit
+_proposals = _stores.proposals
+_decisions = _stores.decisions
+_executions = _stores.executions
+_approvals = _stores.approvals
+_candidate_sets = _stores.candidate_sets
+_institution = _stores.institution
+
+_EXPENDITURE_RULESET = load_expenditure_ruleset()
+register_expenditure_policy_metadata(_EXPENDITURE_RULESET)
+get_technical_draft_policy_governance()
+ensure_effective_policy_merge_warmed()
 
 
 def _institution_expenditure_authorize(req: ActionProposal) -> tuple[InstitutionDecisionOutcome, str, str, list[str]]:
-    """
-    Minimal vertical slice: expenditure approval domain.
+    """Expenditure domain: declarative rules in steward_service/data/institution_expenditure_rules.json."""
+    o, r, rid, miss = evaluate_expenditure(req, _EXPENDITURE_RULESET)
+    return InstitutionDecisionOutcome(o), r, rid, miss
 
-    Rule:
-      - junior_engineer may allow expenditure approvals only if amount_rs <= 50_000
-      - above threshold: escalate
-      - missing facts or missing procedure state: defer
-    """
-    missing: list[str] = []
-    params = dict(req.parameters)
-    ctx = dict(req.context)
 
-    # Required facts
-    amount = params.get("amount_rs")
-    if not isinstance(amount, (int, float)):
-        missing.append("amount_rs")
-    # Required procedure state
-    proc = ctx.get("procedure")
-    state = ctx.get("procedure_state")
-    if not isinstance(proc, str) or not proc.strip():
-        missing.append("procedure")
-    if not isinstance(state, str) or not state.strip():
-        missing.append("procedure_state")
-
-    if missing:
-        return (
-            InstitutionDecisionOutcome.defer,
-            f"Deferred: missing required fact(s) or procedure state: {', '.join(missing)}.",
-            "rule.expenditure.required_facts_v1",
-            missing,
-        )
-
-    role = (req.role or "").strip().lower()
-    amt = float(amount)
-    if role == "junior_engineer":
-        if amt <= 50_000:
-            return (
-                InstitutionDecisionOutcome.allow,
-                "Allowed: junior_engineer authority applies (amount_rs <= 50,000).",
-                "rule.expenditure.junior_threshold_v1",
-                [],
-            )
-        return (
-            InstitutionDecisionOutcome.escalate,
-            "Escalate: amount exceeds junior_engineer authority threshold (amount_rs > 50,000).",
-            "rule.expenditure.junior_threshold_v1",
-            [],
-        )
-
-    return (
-        InstitutionDecisionOutcome.needs_approval,
-        f"Needs approval: role '{role or 'unknown'}' has no direct authority for this expenditure approval.",
-        "rule.expenditure.role_authority_v1",
-        [],
-    )
 _openshell = create_openshell_client()
 
 
@@ -558,7 +515,7 @@ def _to_public_audit(record: InternalAuditRecord) -> AuditRecord:
         proposal=proposal,
         decision=Decision(record.decision.value) if record.decision is not None else None,
         rationale=record.rationale,
-        payload=_audit.to_public_payload(record),
+        payload=InMemoryAuditStore.to_public_payload(record),
         governance_proposal_id=record.governance_proposal_id,
         decision_record_id=record.decision_record_id,
         execution_record_id=record.execution_record_id,
@@ -741,14 +698,13 @@ def authorize(req: AuthorizeRequest) -> AuthorizeResponse:
 
 @app.post("/action/simulate", response_model=SimulateResponse)
 def simulate(req: SimulateRequest) -> SimulateResponse:
+    """
+    What-if evaluation: same plan as authorize/execute would use, without persisting
+    GovernanceProposalRecord or DecisionRecord. Writes one in-memory audit row only
+    (audit_id); payload omits governance_proposal_id / decision_record_id.
+    """
     internal = _to_internal(req.proposal)
-    gp, plan = evaluate_content(
-        _proposals,
-        internal,
-        lambda p: build_execution_plan(p, _openshell),
-    )
-    gp_id = gp.id
-    dr_id = _persist_decision(gp_id, internal.proposal_id, plan)
+    plan = build_execution_plan(internal, _openshell)
     audit_id = _audit.new_id()
     geo = GovernanceContext.from_proposal_context(dict(req.proposal.context))
     requested_by = geo.requested_by or parse_identity(internal.role)
@@ -760,6 +716,7 @@ def simulate(req: SimulateRequest) -> SimulateResponse:
         f"risk_tier={plan.risk_tier.value}",
         f"approval_policy.auto_allow={bool(plan.approval_policy.auto_allow) if plan.approval_policy else True}",
         f"approval_policy.approver_role={plan.approval_policy.approver_role if plan.approval_policy else 'operator'}",
+        "simulate_ephemeral=true",
     ]
     if geo.channel:
         governance_basis.append(f"channel={geo.channel}")
@@ -779,12 +736,11 @@ def simulate(req: SimulateRequest) -> SimulateResponse:
         rationale=plan.rationale,
         plan=plan,
         result={},
-        governance_proposal_id=gp_id,
-        decision_record_id=dr_id,
+        governance_proposal_id=None,
+        decision_record_id=None,
     )
     _audit.put(rec)
-    _link_proposal_audit(gp_id, audit_id)
-    simulation = _audit.to_public_payload(rec).get("plan", {})
+    simulation = InMemoryAuditStore.to_public_payload(rec).get("plan", {})
     return SimulateResponse(audit_id=audit_id, simulation=simulation)
 
 
@@ -914,6 +870,13 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
         mark_proposal_approved_after_external_ok(_proposals, gp_id)
         # Prior decision record may still reflect needs_approval from authorize; snapshot effective allow for this execution.
         dr_id = _persist_decision(gp_id, internal.proposal_id, plan_exec)
+        ar_key = ctx.get("approval_request_id")
+        if isinstance(ar_key, str) and ar_key.strip():
+            ar_rec = _approvals.get(ar_key.strip())
+            if ar_rec is not None and ar_rec.governance_proposal_id == gp_id:
+                ar_rec.decision_record_id = dr_id
+                ar_rec.updated_at = _approvals.now()
+                _approvals.put(ar_rec)
 
     if plan_exec.decision == DomainDecision.allow:
         gpx = _proposals.get(gp_id)
@@ -1021,6 +984,7 @@ def institution_authorize(req: InstitutionAuthorizeRequest) -> InstitutionAuthor
         proposal=internal,
         outcome=outcome.value,
         rationale=rationale,
+        domain=_EXPENDITURE_RULESET.domain,
         rule_id=rule_id,
         missing_facts=list(missing),
     )
@@ -1075,7 +1039,13 @@ def _evaluate_candidates_impl(req: EvaluateCandidatesRequest) -> EvaluateCandida
     ]
     for c in req.candidates:
         internal = _to_internal(c.proposal)
-        plan = build_execution_plan(internal, _openshell)
+        gp, plan = evaluate_content(
+            _proposals,
+            internal,
+            lambda p: build_execution_plan(p, _openshell),
+        )
+        gp_id = gp.id
+        dr_id = _persist_decision(gp_id, internal.proposal_id, plan)
         audit_id = _audit.new_id()
 
         geo = GovernanceContext.from_proposal_context(dict(c.proposal.context))
@@ -1119,8 +1089,11 @@ def _evaluate_candidates_impl(req: EvaluateCandidatesRequest) -> EvaluateCandida
                     "risk_tier": plan.risk_tier.value,
                 },
             },
+            governance_proposal_id=gp_id,
+            decision_record_id=dr_id,
         )
         _audit.put(rec)
+        _link_proposal_audit(gp_id, audit_id)
         out.append(
             CandidateEvaluation(
                 id=c.id,

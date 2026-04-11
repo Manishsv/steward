@@ -83,7 +83,24 @@ From inside the sandbox, the usual host bridge name is:
 - `POST /action/execute`
 - `GET /audit/{id}`
 
-The service stores audit records **in-memory** in this scaffold. Restarting `uvicorn` clears previous `/audit/{id}` records.
+### Storage backends
+
+- **Default:** in-memory stores — restarting the process clears audits, proposals, decisions, approvals, etc.
+- **Durable (SQLite):** set before starting the app:
+  ```bash
+  export STEWARD_STORAGE_BACKEND=sqlite
+  export STEWARD_SQLITE_PATH=/var/lib/steward/steward.db
+  uvicorn steward_service.main:app --host 0.0.0.0 --port 8000
+  ```
+  All governance artifacts listed in `steward_service/storage/protocols.py` persist in one SQLite file (WAL mode). Use a single process or external DB if you need concurrent writers beyond SQLite’s model.
+
+### Institutional expenditure (declarative)
+
+Authoritative rules live in **`steward_service/data/institution_expenditure_rules.json`** — edit roles, thresholds, and required facts there; restart (or reload process) to pick up changes. Policy metadata is exposed at **`GET /policies/institution.expenditure.v1`**.
+
+**`/action/simulate` contract:** Computes the same governance **plan** as authorize would (via `build_execution_plan`) but does **not** create a `GovernanceProposalRecord` or `DecisionRecord`. It only writes an **audit** row (`audit_id` returned). Use `/action/authorize` when you need persisted proposal/decision ids for approval workflows.
+
+**Bulk draft-policy actions:** `openshell.draft_policy.approve_all` and `openshell.draft_policy.clear` always return **`needs_approval`** (including when `role` is `operator`); complete the approval flow before execute.
 
 ## Phase 1A (OpenShell draft policy governance)
 
@@ -96,7 +113,7 @@ Supported `proposal.action` values:
 - `openshell.draft_policy.approve_all` / `clear` (high risk; never auto-allowed in Phase 1A)
 
 What Steward does in Phase 1A:
-- **Plans** the intended OpenShell operation(s) (`/action/simulate`)
+- **Plans** the intended OpenShell operation(s) (`/action/simulate` — ephemeral; see contract above)
 - **Authorizes** based on risk tier + role (`/action/authorize`)
 - **Executes** the gRPC call when allowed (`/action/execute`)
 - **Audits**: stores decision basis + external refs (`/audit/{id}`)

@@ -1,0 +1,33 @@
+{
+  "version": "1",
+  "policy_id": "policy.steward.effective_policy_merge.v1",
+  "display_name": "Effective autonomy ceiling merge",
+  "description": "Constitution default, per-role autonomy ceilings, and local narrowing for resolve_effective_policy (governance + /effective-policy/resolve).",
+  "constitution": {
+    "version": "v0",
+    "autonomy_ceiling": "medium"
+  },
+  "role_ceilings": [
+    {
+      "match_roles": ["operator"],
+      "autonomy_ceiling": "high",
+      "priority": 100
+    },
+    {
+      "match_roles": ["*"],
+      "autonomy_ceiling": "medium",
+      "priority": 0
+    }
+  ],
+  "local_policy": {
+    "context_key": "steward_local_policy",
+    "autonomy_ceiling_field": "autonomy_ceiling",
+    "ignore_invalid_tier": true
+  },
+  "merge": {
+    "clamp_role_to_constitution": true,
+    "clamp_local_to_constitution": true,
+    "missing_local_uses_constitution_index": true,
+    "effective_operation": "min_index"
+  }
+}

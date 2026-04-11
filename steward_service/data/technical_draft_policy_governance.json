@@ -1,0 +1,145 @@
+{
+  "version": "1",
+  "policy_id": "policy.technical.draft_policy.v1",
+  "display_name": "OpenShell draft-policy technical governance",
+  "description": "Authoritative risk, capability/tool mapping, and approval rules for openshell.draft_policy.* actions.",
+  "family": "openshell.draft_policy",
+  "default_deny": {
+    "risk_tier": "high",
+    "approver_role": "operator",
+    "approval_policy_notes": "deny_by_default",
+    "unsupported_rationale_template": "Unsupported action: no governance policy exists for this action. (family={family})",
+    "unsupported_requirement_reason": "Unsupported action requires explicit policy to be added before execution."
+  },
+  "actions": [
+    {
+      "steward_action": "openshell.draft_policy.get",
+      "capability_id": "cap.openshell.draft_policy.read",
+      "tool_id": "tool.openshell.draft_policy.get",
+      "base_risk_tier": "low",
+      "approver_role": "operator",
+      "mutation": false,
+      "requires_sandbox_name": true,
+      "requires_chunk_id": false,
+      "inspect_chunk_security_notes": false,
+      "bulk_always_needs_approval": false,
+      "execute": {
+        "kind": "get_draft_policy",
+        "allow_rationale": "Read-only draft policy fetch.",
+        "step_description": "Fetch draft policy chunks for sandbox."
+      }
+    },
+    {
+      "steward_action": "openshell.draft_policy.approve",
+      "capability_id": "cap.openshell.draft_policy.write",
+      "tool_id": "tool.openshell.draft_policy.mutate",
+      "base_risk_tier": "medium",
+      "approver_role": "operator",
+      "mutation": true,
+      "mutation_operator_reason": "Draft policy mutations require operator role.",
+      "requires_sandbox_name": true,
+      "requires_chunk_id": true,
+      "inspect_chunk_security_notes": true,
+      "bulk_always_needs_approval": false,
+      "execute": {
+        "kind": "approve_chunk",
+        "allow_rationale": "Approved by operator.",
+        "step_description": "Approve one pending draft chunk."
+      }
+    },
+    {
+      "steward_action": "openshell.draft_policy.reject",
+      "capability_id": "cap.openshell.draft_policy.write",
+      "tool_id": "tool.openshell.draft_policy.mutate",
+      "base_risk_tier": "medium",
+      "approver_role": "operator",
+      "mutation": true,
+      "mutation_operator_reason": "Draft policy mutations require operator role.",
+      "requires_sandbox_name": true,
+      "requires_chunk_id": true,
+      "inspect_chunk_security_notes": true,
+      "bulk_always_needs_approval": false,
+      "execute": {
+        "kind": "reject_chunk",
+        "allow_rationale": "Rejected by operator.",
+        "step_description": "Reject one pending draft chunk."
+      }
+    },
+    {
+      "steward_action": "openshell.draft_policy.edit",
+      "capability_id": "cap.openshell.draft_policy.write",
+      "tool_id": "tool.openshell.draft_policy.mutate",
+      "base_risk_tier": "medium",
+      "approver_role": "operator",
+      "mutation": true,
+      "mutation_operator_reason": "Draft policy mutations require operator role.",
+      "requires_sandbox_name": true,
+      "requires_chunk_id": true,
+      "inspect_chunk_security_notes": true,
+      "bulk_always_needs_approval": false,
+      "execute": {
+        "kind": "edit_chunk",
+        "allow_rationale": "Edited by operator.",
+        "step_description": "Edit one pending draft chunk in-place.",
+        "requires_proposed_rule": true
+      }
+    },
+    {
+      "steward_action": "openshell.draft_policy.approve_all",
+      "capability_id": "cap.openshell.draft_policy.write",
+      "tool_id": "tool.openshell.draft_policy.mutate",
+      "base_risk_tier": "high",
+      "approver_role": "operator",
+      "mutation": true,
+      "mutation_operator_reason": "Draft policy mutations require operator role.",
+      "requires_sandbox_name": true,
+      "requires_chunk_id": false,
+      "inspect_chunk_security_notes": false,
+      "bulk_always_needs_approval": true,
+      "bulk_approval_reason": "Bulk draft-policy approve_all/clear requires explicit operator approval (Phase 1A).",
+      "execute": {
+        "kind": "approve_all",
+        "allow_rationale": "Approved all by operator.",
+        "step_description": "Approve all pending chunks (optionally include security-flagged)."
+      }
+    },
+    {
+      "steward_action": "openshell.draft_policy.clear",
+      "capability_id": "cap.openshell.draft_policy.write",
+      "tool_id": "tool.openshell.draft_policy.mutate",
+      "base_risk_tier": "high",
+      "approver_role": "operator",
+      "mutation": true,
+      "mutation_operator_reason": "Draft policy mutations require operator role.",
+      "requires_sandbox_name": true,
+      "requires_chunk_id": false,
+      "inspect_chunk_security_notes": false,
+      "bulk_always_needs_approval": true,
+      "bulk_approval_reason": "Bulk draft-policy approve_all/clear requires explicit operator approval (Phase 1A).",
+      "execute": {
+        "kind": "clear",
+        "allow_rationale": "Cleared by operator.",
+        "step_description": "Clear all pending draft chunks for sandbox."
+      }
+    },
+    {
+      "steward_action": "openshell.draft_policy.approve_matching",
+      "capability_id": "cap.openshell.draft_policy.write",
+      "tool_id": "tool.openshell.draft_policy.approve_matching",
+      "base_risk_tier": "medium",
+      "approver_role": "operator",
+      "mutation": true,
+      "mutation_operator_reason": "Draft policy mutations require operator role.",
+      "requires_sandbox_name": true,
+      "requires_chunk_id": false,
+      "inspect_chunk_security_notes": false,
+      "bulk_always_needs_approval": false,
+      "execute": {
+        "kind": "approve_matching",
+        "allow_rationale": "Approved matching draft chunk by operator.",
+        "step_description": "Approve a pending draft chunk that matches host/port/binary.",
+        "requires_match": true
+      }
+    }
+  ]
+}

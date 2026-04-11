@@ -1,0 +1,57 @@
+{
+  "domain": "institution.expenditure.v1",
+  "version": "2",
+  "policy_id": "institution.expenditure.v1",
+  "display_name": "Institutional expenditure authorization",
+  "description": "Declarative required facts and role thresholds for expenditure.approve actions.",
+  "required_facts": [
+    {
+      "id": "amount_rs",
+      "source": "parameters",
+      "key": "amount_rs",
+      "types": ["number"],
+      "defer_code": "amount_rs"
+    },
+    {
+      "id": "procedure",
+      "source": "context",
+      "key": "procedure",
+      "types": ["string"],
+      "defer_code": "procedure"
+    },
+    {
+      "id": "procedure_state",
+      "source": "context",
+      "key": "procedure_state",
+      "types": ["string"],
+      "defer_code": "procedure_state"
+    }
+  ],
+  "defer_rule_id": "rule.expenditure.required_facts_v1",
+  "defer_rationale_template": "Deferred: missing required fact(s) or procedure state: {missing_list}.",
+  "role_rules": [
+    {
+      "match_roles": ["junior_engineer"],
+      "priority": 30,
+      "kind": "threshold_escalate_above",
+      "max_direct_amount_rs": 50000,
+      "rule_id": "rule.expenditure.junior_threshold_v1",
+      "allow_rationale": "Allowed: junior_engineer authority applies (amount_rs <= 50,000).",
+      "above_rationale": "Escalate: amount exceeds junior_engineer authority threshold (amount_rs > 50,000)."
+    },
+    {
+      "match_roles": ["senior_engineer"],
+      "priority": 20,
+      "kind": "threshold_needs_approval_above",
+      "max_direct_amount_rs": 200000,
+      "rule_id": "rule.expenditure.senior_threshold_v1",
+      "allow_rationale": "Allowed: senior_engineer authority applies (amount_rs <= 200,000).",
+      "above_rationale": "Needs approval: amount exceeds senior_engineer direct authority (amount_rs > 200,000)."
+    }
+  ],
+  "fallback": {
+    "outcome": "needs_approval",
+    "rule_id": "rule.expenditure.role_authority_v1",
+    "rationale_template": "Needs approval: role '{role}' has no direct authority for this expenditure approval."
+  }
+}

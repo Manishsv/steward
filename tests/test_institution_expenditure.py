@@ -54,6 +54,19 @@ class TestInstitutionExpenditure(unittest.TestCase):
         dr = self.client.get(f"/institution/decision-records/{r.json()['decision_record_id']}").json()
         self.assertIn("amount_rs", dr["missing_facts"])
 
+    def test_senior_below_threshold_allows(self) -> None:
+        r = self.client.post("/institution/authorize", json=self._req(role="senior_engineer", amount_rs=150_000))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["outcome"], "allow")
+        dr = self.client.get(f"/institution/decision-records/{r.json()['decision_record_id']}").json()
+        self.assertEqual(dr["outcome"], "allow")
+        self.assertIn("senior_engineer", dr["rationale"].lower())
+
+    def test_senior_above_threshold_needs_approval(self) -> None:
+        r = self.client.post("/institution/authorize", json=self._req(role="senior_engineer", amount_rs=250_000))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["outcome"], "needs_approval")
+
 
 if __name__ == "__main__":
     unittest.main()

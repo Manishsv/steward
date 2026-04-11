@@ -94,6 +94,43 @@ class TestCandidateEvaluateEndpoint(unittest.TestCase):
         self.assertEqual(body["selection"]["selected_id"], "approve-npm-registry")
         self.assertEqual(body["selection"]["decision"], "allow")
 
+    def test_evaluate_audit_links_governance_proposal_for_needs_approval(self) -> None:
+        """Each evaluate audit must back POST /approval-requests (NemoClaw approval complete)."""
+        c = TestClient(app)
+        res = c.post(
+            "/action/evaluate",
+            json={
+                "candidates": [
+                    {
+                        "id": "bulk",
+                        "label": "Approve all pending",
+                        "proposal": {
+                            "action": "openshell.draft_policy.approve_all",
+                            "purpose": "bulk approve",
+                            "role": "operator",
+                            "context": {"requested_by": "user:test"},
+                            "parameters": {"sandbox_name": "manz"},
+                        },
+                    },
+                ]
+            },
+        )
+        self.assertEqual(res.status_code, 200)
+        body = res.json()
+        self.assertEqual(len(body["evaluations"]), 1)
+        ev = body["evaluations"][0]
+        self.assertEqual(ev["decision"], "needs_approval")
+        audit_id = ev["audit_id"]
+        self.assertTrue(audit_id)
+        ar = c.get(f"/audit/{audit_id}")
+        self.assertEqual(ar.status_code, 200)
+        aud = ar.json()
+        self.assertTrue(aud.get("governance_proposal_id"))
+        gp_id = aud["governance_proposal_id"]
+        apr = c.post("/approval-requests", json={"governance_proposal_id": gp_id})
+        self.assertEqual(apr.status_code, 200, msg=apr.text)
+        self.assertEqual(apr.json()["governance_proposal_id"], gp_id)
+
 
 if __name__ == "__main__":
     unittest.main()

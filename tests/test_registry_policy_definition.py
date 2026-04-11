@@ -23,6 +23,30 @@ class TestPolicyDefinitionRegistry(unittest.TestCase):
         r = self.client.get("/policies/policy.does.not.exist")
         self.assertEqual(r.status_code, 404)
 
+    def test_institution_expenditure_policy_metadata(self) -> None:
+        r = self.client.get("/policies/institution.expenditure.v1")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["id"], "institution.expenditure.v1")
+        self.assertEqual(body["version"], "2")
+        self.assertIn("JSON", body["description"])
+
+    def test_technical_draft_policy_policy_metadata(self) -> None:
+        r = self.client.get("/policies/policy.technical.draft_policy.v1")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["id"], "policy.technical.draft_policy.v1")
+        self.assertEqual(body["version"], "1")
+        self.assertIn("JSON", body["description"])
+
+    def test_effective_policy_merge_metadata(self) -> None:
+        r = self.client.get("/policies/policy.steward.effective_policy_merge.v1")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["id"], "policy.steward.effective_policy_merge.v1")
+        self.assertEqual(body["version"], "1")
+        self.assertIn("JSON", body["description"])
+
 
 class TestRoleDefinitionRegistryCatalog(unittest.TestCase):
     def setUp(self) -> None:

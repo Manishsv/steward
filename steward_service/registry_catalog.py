@@ -30,6 +30,12 @@ ROLES: Dict[str, RoleDefinition] = {
         description="Junior engineer with limited institutional authority for expenditure approvals.",
         version="1",
     ),
+    "senior_engineer": RoleDefinition(
+        id="senior_engineer",
+        display_name="Senior Engineer",
+        description="Senior engineer with higher direct authority for expenditure approvals (see institution rules).",
+        version="1",
+    ),
 }
 
 POLICIES: Dict[str, PolicyDefinition] = {

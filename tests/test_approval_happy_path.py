@@ -92,6 +92,13 @@ class TestApprovalHappyPath(unittest.TestCase):
         gp_final = self.client.get(f"/proposals/{gp_id}").json()
         self.assertEqual(gp_final["state"], "executed")
 
+        ar_final = self.client.get(f"/approval-requests/{ar_id}").json()
+        self.assertEqual(
+            ar_final["decision_record_id"],
+            dr_id_exec,
+            "ApprovalRequest should reference the post-approval allow DecisionRecord",
+        )
+
     def test_execute_blocked_resume_without_approval_request_id(self) -> None:
         """Resume alone does not bypass needs_approval without a valid approval_request_id."""
         auth = self.client.post(

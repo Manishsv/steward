@@ -122,6 +122,11 @@ class TestPhase9Registry(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["id"], "operator")
 
+    def test_get_role_senior_engineer(self) -> None:
+        r = self.client.get("/roles/senior_engineer")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["id"], "senior_engineer")
+
     def test_get_capability(self) -> None:
         r = self.client.get("/capabilities/cap.openshell.draft_policy.read")
         self.assertEqual(r.status_code, 200)
